@@ -961,10 +961,146 @@ static enum input_action decode_bytes(const unsigned char *sequence, size_t len)
     return input_core_decode_escape(read_byte_array, &reader);
 }
 
+/* A prompt-wide editor for vertical-motion tests: 3-cell prompt, 40 columns. */
+static struct input *new_editor(const char *initial)
+{
+    struct input *in = input_new();
+    in->prompt = ">> ";
+    in->display_columns = 40;
+    if (initial)
+        input_core_set_buffer(in, initial);
+    in->hist_pos = in->hist_n;
+    return in;
+}
+
+static int editor_cursor_row(const struct input *in)
+{
+    struct input_layout layout;
+    input_core_compute_layout(in->buf, in->len, in->cursor, input_core_prompt_width(in->prompt),
+                              in->display_columns, &layout);
+    return layout.cursor_row;
+}
+
+static void test_move_up_down_single_line_falls_through_to_history(void)
+{
+    struct input *in = new_editor("");
+    input_core_history_add(in, "one");
+    input_core_history_add(in, "two");
+    in->hist_pos = in->hist_n;
+
+    /* S1: a single-line draft behaves exactly as history recall did. */
+    input_core_move_up(in);
+    EXPECT_STR_EQ(in->buf, "two");
+    input_core_move_up(in);
+    EXPECT_STR_EQ(in->buf, "one");
+    input_core_move_up(in);
+    EXPECT_STR_EQ(in->buf, "one");
+    input_core_move_down(in);
+    EXPECT_STR_EQ(in->buf, "two");
+    input_core_move_down(in);
+    EXPECT_STR_EQ(in->buf, "");
+
+    input_free(in);
+}
+
+static void test_move_up_multiline_moves_cursor(void)
+{
+    /* "aaa\nbbbb\nccccc": rows 0-2; offset 10 sits on row 2. */
+    struct input *in = new_editor("aaa\nbbbb\nccccc");
+
+    /* S2: within a multiline draft, Up moves rows without touching history. */
+    input_core_move_up(in);
+    EXPECT(editor_cursor_row(in) == 1);
+    EXPECT(in->cursor == 8); /* row 1 end: desired column 8 clamped to 7 */
+    EXPECT_STR_EQ(in->buf, "aaa\nbbbb\nccccc");
+    EXPECT(in->hist_pos == in->hist_n); /* the draft was not stashed */
+
+    input_core_move_up(in);
+    EXPECT(editor_cursor_row(in) == 0);
+    EXPECT(in->cursor == 3); /* row 0 end */
+
+    /* S3: Up from the first visual line recalls history, stashing the draft. */
+    input_core_move_up(in);
+    EXPECT(in->hist_pos < in->hist_n || in->hist_n == 0);
+
+    input_free(in);
+}
+
+static void test_move_down_at_last_line_falls_through_to_history(void)
+{
+    struct input *in = new_editor("multi\nline");
+    input_core_history_add(in, "one");
+    input_core_history_add(in, "two");
+    in->hist_pos = in->hist_n;
+
+    /* S4: Down on the last visual line is history next, as today. */
+    input_core_move_down(in);
+    EXPECT_STR_EQ(in->buf, "multi\nline");
+    EXPECT(editor_cursor_row(in) == 1);
+
+    /* Up from the last line is motion, not a stash: the draft must survive. */
+    input_core_move_up(in);
+    EXPECT(editor_cursor_row(in) == 0);
+    EXPECT_STR_EQ(in->buf, "multi\nline");
+
+    /* Now at row 0: Up enters history; Down from the recalled single-line
+     * entry returns to the draft. */
+    input_core_move_up(in);
+    EXPECT_STR_EQ(in->buf, "two");
+    input_core_move_down(in);
+    EXPECT_STR_EQ(in->buf, "multi\nline");
+    EXPECT(editor_cursor_row(in) == 1);
+
+    input_free(in);
+}
+
+static void test_move_up_soft_wrap(void)
+{
+    /* S5: "hello world" in 10 columns wraps without a hard newline. */
+    struct input *in = input_new();
+    in->prompt = ">> ";
+    in->display_columns = 10;
+    input_core_set_buffer(in, "hello world");
+    in->hist_pos = in->hist_n;
+
+    EXPECT(editor_cursor_row(in) == 1);
+    input_core_move_up(in);
+    EXPECT(editor_cursor_row(in) == 0);
+    /* Moving inside the buffer, not recalling: history was empty anyway. */
+    EXPECT_STR_EQ(in->buf, "hello world");
+    EXPECT(in->cursor <= 5); /* landed within "hello" */
+
+    input_free(in);
+}
+
+static void test_move_up_down_preserves_desired_column(void)
+{
+    /* S6: row ends — row 0 at column 6 (prompt 3 + 3), row 1 at 7, row 2 at 8. */
+    struct input *in = new_editor("aaa\nbbbb\nccccc");
+    in->cursor = 8; /* end of "bbbb", column 7 */
+
+    input_core_move_up(in);
+    EXPECT(editor_cursor_row(in) == 0);
+    EXPECT(in->cursor == 3); /* clamped to row 0 end */
+
+    input_core_move_down(in);
+    EXPECT(editor_cursor_row(in) == 1);
+    EXPECT(in->cursor == 8); /* the desired column was kept */
+
+    /* Horizontal motion resets the sticky column to the current one. */
+    input_core_move_up(in);
+    input_core_move_left(in); /* column 5 */
+    input_core_move_down(in);
+    EXPECT(editor_cursor_row(in) == 1);
+    EXPECT(in->cursor == 6);
+
+    input_free(in);
+}
+
 static void test_decode_unmodified_csi(void)
 {
-    EXPECT(decode("[A") == INPUT_ACTION_HISTORY_PREV);
-    EXPECT(decode("[B") == INPUT_ACTION_HISTORY_NEXT);
+    EXPECT(decode("[A") == INPUT_ACTION_MOVE_UP);
+    EXPECT(decode("[B") == INPUT_ACTION_MOVE_DOWN);
     EXPECT(decode("[C") == INPUT_ACTION_MOVE_RIGHT);
     EXPECT(decode("[D") == INPUT_ACTION_MOVE_LEFT);
     EXPECT(decode("[H") == INPUT_ACTION_LINE_START);
@@ -973,8 +1109,8 @@ static void test_decode_unmodified_csi(void)
 
 static void test_decode_unmodified_ss3(void)
 {
-    EXPECT(decode("OA") == INPUT_ACTION_HISTORY_PREV);
-    EXPECT(decode("OB") == INPUT_ACTION_HISTORY_NEXT);
+    EXPECT(decode("OA") == INPUT_ACTION_MOVE_UP);
+    EXPECT(decode("OB") == INPUT_ACTION_MOVE_DOWN);
     EXPECT(decode("OC") == INPUT_ACTION_MOVE_RIGHT);
     EXPECT(decode("OD") == INPUT_ACTION_MOVE_LEFT);
     EXPECT(decode("OH") == INPUT_ACTION_LINE_START);
@@ -1039,8 +1175,8 @@ static void test_decode_tilde_no_fkey_alias(void)
 static void test_decode_rxvt_csi_lowercase(void)
 {
     /* rxvt lowercase CSI arrows denote Shift, which remains plain motion. */
-    EXPECT(decode("[a") == INPUT_ACTION_HISTORY_PREV);
-    EXPECT(decode("[b") == INPUT_ACTION_HISTORY_NEXT);
+    EXPECT(decode("[a") == INPUT_ACTION_MOVE_UP);
+    EXPECT(decode("[b") == INPUT_ACTION_MOVE_DOWN);
     EXPECT(decode("[c") == INPUT_ACTION_MOVE_RIGHT);
     EXPECT(decode("[d") == INPUT_ACTION_MOVE_LEFT);
 }
@@ -1048,8 +1184,8 @@ static void test_decode_rxvt_csi_lowercase(void)
 static void test_decode_rxvt_ss3_lowercase(void)
 {
     /* rxvt lowercase SS3 arrows denote Ctrl. */
-    EXPECT(decode("Oa") == INPUT_ACTION_HISTORY_PREV);
-    EXPECT(decode("Ob") == INPUT_ACTION_HISTORY_NEXT);
+    EXPECT(decode("Oa") == INPUT_ACTION_MOVE_UP);
+    EXPECT(decode("Ob") == INPUT_ACTION_MOVE_DOWN);
     EXPECT(decode("Oc") == INPUT_ACTION_MOVE_WORD_RIGHT);
     EXPECT(decode("Od") == INPUT_ACTION_MOVE_WORD_LEFT);
 }
@@ -1071,7 +1207,7 @@ static void test_decode_iterm_meta_prefix(void)
     /* iTerm2 Esc+ mode adds a second ESC before Option cursor keys. */
     EXPECT(decode("\x1b[D") == INPUT_ACTION_MOVE_WORD_LEFT);
     EXPECT(decode("\x1b[C") == INPUT_ACTION_MOVE_WORD_RIGHT);
-    EXPECT(decode("\x1b[A") == INPUT_ACTION_HISTORY_PREV);
+    EXPECT(decode("\x1b[A") == INPUT_ACTION_MOVE_UP);
 
     EXPECT(decode("\x1b[1;5D") == INPUT_ACTION_MOVE_WORD_LEFT);
 
@@ -1249,6 +1385,12 @@ int main(void)
     test_history_encode_decode_roundtrip();
 
     test_prompt_width_strips_ansi();
+
+    test_move_up_down_single_line_falls_through_to_history();
+    test_move_up_multiline_moves_cursor();
+    test_move_down_at_last_line_falls_through_to_history();
+    test_move_up_soft_wrap();
+    test_move_up_down_preserves_desired_column();
 
     test_decode_unmodified_csi();
     test_decode_unmodified_ss3();

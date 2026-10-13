@@ -176,6 +176,7 @@ endforeach
 e2e_scenarios = [
     'oneshot',
     'repl_complete',
+    'repl_editor',
     'repl_interrupt',
     'repl_smoke',
 ]

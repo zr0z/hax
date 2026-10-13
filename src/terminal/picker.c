@@ -581,10 +581,10 @@ enum picker_input_result {
 static void apply_escape_action(struct picker_core *core, enum input_action action)
 {
     switch (action) {
-    case INPUT_ACTION_HISTORY_PREV:
+    case INPUT_ACTION_MOVE_UP:
         picker_core_move_selection(core, PICKER_DIRECTION_PREVIOUS);
         break;
-    case INPUT_ACTION_HISTORY_NEXT:
+    case INPUT_ACTION_MOVE_DOWN:
         picker_core_move_selection(core, PICKER_DIRECTION_NEXT);
         break;
     case INPUT_ACTION_LINE_START:

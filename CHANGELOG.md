@@ -7,6 +7,13 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Changed
+
+- Up/Down move the cursor between the lines of a multi-line prompt — hard newlines and soft-wrapped
+  rows alike — keeping the desired column across rows of different length. They recall prompt
+  history only at the boundary: Up on the first line, Down on the last. Single-line prompts behave
+  exactly as before.
+
 ## [0.6.1] - 2026-10-15
 
 ### Added

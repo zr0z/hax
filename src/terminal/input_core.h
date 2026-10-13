@@ -57,6 +57,12 @@ struct input {
     int display_columns;
     int terminal_rows; /* 0 disables viewport clipping */
 
+    /* Sticky display column for vertical motion: valid while desired_cursor
+     * still marks the cursor position, so any motion or edit that moves the
+     * cursor invalidates it without bookkeeping at each mutation. -1 = none. */
+    int desired_col;
+    size_t desired_cursor;
+
     /* Terminal state */
     struct termios saved_termios;
     int raw_active;
@@ -127,6 +133,13 @@ size_t input_core_alnum_word_start(const char *text, size_t end);
 /* ---- motions / edits (operate on the buffer at in->cursor) ---- */
 size_t input_core_line_start(const struct input *in);
 size_t input_core_line_end(const struct input *in);
+/* Byte offset painted at visual (row, col) of the editor's own prompt/columns
+ * geometry; a column past the row's content lands at the row's end. */
+size_t input_core_offset_at(const struct input *in, int row, int col);
+/* Vertical motion across visual rows with a sticky desired column; at the
+ * first/last row the keys fall through to history recall. */
+void input_core_move_up(struct input *in);
+void input_core_move_down(struct input *in);
 void input_core_move_left(struct input *in);
 void input_core_move_right(struct input *in);
 void input_core_move_word_left(struct input *in);
@@ -218,13 +231,13 @@ enum input_action {
     INPUT_ACTION_NONE = 0, /* unknown / abandoned (timeout, overflow) */
     INPUT_ACTION_MOVE_LEFT,
     INPUT_ACTION_MOVE_RIGHT,
+    INPUT_ACTION_MOVE_UP,
+    INPUT_ACTION_MOVE_DOWN,
     INPUT_ACTION_MOVE_WORD_LEFT,
     INPUT_ACTION_MOVE_WORD_RIGHT,
     INPUT_ACTION_LINE_START,
     INPUT_ACTION_LINE_END,
     INPUT_ACTION_DELETE_FWD,
-    INPUT_ACTION_HISTORY_PREV,
-    INPUT_ACTION_HISTORY_NEXT,
     INPUT_ACTION_PAGE_UP,
     INPUT_ACTION_PAGE_DOWN,
     INPUT_ACTION_KILL_WORD_FWD,

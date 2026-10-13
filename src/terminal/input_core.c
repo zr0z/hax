@@ -18,6 +18,7 @@ struct input *input_new(void)
     in->buf = xmalloc(64);
     in->cap = 64;
     in->buf[0] = '\0';
+    in->desired_col = -1;
     return in;
 }
 
@@ -267,6 +268,87 @@ static size_t scan_alnum_right(const char *buf, size_t len, size_t i)
 void input_core_move_word_left(struct input *in)
 {
     in->cursor = input_core_alnum_word_start(in->buf, in->cursor);
+}
+
+/* --- visual-row geometry --- */
+
+static void editor_layout(const struct input *in, size_t cursor, struct input_layout *out)
+{
+    int prompt_width = input_core_prompt_width(in->prompt ? in->prompt : "");
+    int continuation = in->continuation_at_column_zero ? 0 : prompt_width;
+    input_core_render(in->buf, in->len, cursor, prompt_width, continuation, in->display_columns,
+                      NULL, NULL, out);
+}
+
+/* Byte offset whose painted position is the visual (row, col): the first offset at or right of
+ * `col`, or the row's boundary offset when the row ends earlier. Cursor position is monotonic in
+ * the offset, so this binary-searches the walk itself — the hit-test can never disagree with the
+ * painter's wrap rules. O(n log n) in buffer size, fine for prompt-sized buffers. */
+size_t input_core_offset_at(const struct input *in, int row, int col)
+{
+    struct input_layout end;
+    editor_layout(in, in->len, &end);
+    if (row < 0)
+        row = 0;
+    if (row > end.end_row)
+        return in->len;
+
+    size_t lo = 0;
+    size_t hi = in->len;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        struct input_layout l;
+        editor_layout(in, mid, &l);
+        if (l.cursor_row > row || (l.cursor_row == row && l.cursor_col >= col))
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+
+    struct input_layout at;
+    editor_layout(in, lo, &at);
+    if (at.cursor_row > row && lo > 0)
+        lo--; /* past the row's content: the boundary offset still paints on it */
+    return lo;
+}
+
+/* Vertical motion with a sticky desired column: repeated Up/Down between rows of
+ * different length return to the same column. The sticky value is valid only while the
+ * cursor still sits at desired_cursor, so every other motion or edit invalidates it.
+ * At the first/last visual row the keys fall through to history recall, fish-style. */
+static void move_vertical(struct input *in, int direction)
+{
+    struct input_layout layout;
+    editor_layout(in, in->cursor, &layout);
+
+    if ((direction < 0 && layout.cursor_row == 0) ||
+        (direction > 0 && layout.cursor_row == layout.end_row)) {
+        in->desired_col = -1;
+        if (direction < 0)
+            input_core_history_prev(in);
+        else
+            input_core_history_next(in);
+        return;
+    }
+
+    int target_col = (in->desired_col >= 0 && in->desired_cursor == in->cursor) ? in->desired_col
+                                                                                : layout.cursor_col;
+    size_t offset = input_core_offset_at(in, layout.cursor_row + direction, target_col);
+    if (offset != in->cursor) {
+        in->cursor = offset;
+        in->desired_col = target_col;
+        in->desired_cursor = offset;
+    }
+}
+
+void input_core_move_up(struct input *in)
+{
+    move_vertical(in, -1);
+}
+
+void input_core_move_down(struct input *in)
+{
+    move_vertical(in, 1);
 }
 
 void input_core_move_word_right(struct input *in)
@@ -805,9 +887,9 @@ static enum input_action arrow_to_action(char final, int word)
 {
     switch (final) {
     case 'A':
-        return INPUT_ACTION_HISTORY_PREV;
+        return INPUT_ACTION_MOVE_UP;
     case 'B':
-        return INPUT_ACTION_HISTORY_NEXT;
+        return INPUT_ACTION_MOVE_DOWN;
     case 'C':
         return word ? INPUT_ACTION_MOVE_WORD_RIGHT : INPUT_ACTION_MOVE_RIGHT;
     case 'D':

@@ -44,13 +44,29 @@ def test_up_moves_lines_then_falls_through_to_history():
     harness.expect("line-one@" in screen, "the draft kept the row-1 edit")
     harness.expect("line-two!" in screen, "the draft kept the row-2 edit")
 
-    # Submit and assert the exact draft the editor holds.
+    # Submit and assert the exact draft the editor holds; the echo prefixes
+    # every submitted line, and the single-turn mock is spent by now.
     term.send("Enter")
     term.expect_screen(
         """
+        ▌ hax › mock · mock-model
+        ▌ ctrl-d quit · try /help
+
+        ▌ stored
+
+        done
+
+        {*}s
+
         ▌ line-one@
-        line-two!
-        line-three
+        ▌ line-two!
+        ▌ line-three
+
+        Script exhausted — no more turns.
+
+        {*}s
+
+        ❯
         """
     )
     term.send("C-d")

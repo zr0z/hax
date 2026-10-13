@@ -263,11 +263,11 @@ static void apply_action(struct input *in, enum input_action a)
     case INPUT_ACTION_DELETE_FWD:
         input_core_delete_fwd(in);
         return;
-    case INPUT_ACTION_HISTORY_PREV:
-        input_core_history_prev(in);
+    case INPUT_ACTION_MOVE_UP:
+        input_core_move_up(in);
         return;
-    case INPUT_ACTION_HISTORY_NEXT:
-        input_core_history_next(in);
+    case INPUT_ACTION_MOVE_DOWN:
+        input_core_move_down(in);
         return;
     case INPUT_ACTION_PAGE_UP:
     case INPUT_ACTION_PAGE_DOWN:
@@ -1367,6 +1367,7 @@ char *input_readline(struct input *in, const char *prompt)
     in->previous_paint_clipped = 0;
     in->window_top = 0;
     in->top_indicator_width = 0;
+    in->desired_col = -1;
 
     fflush(stdout);
     enable_raw_mode(in);

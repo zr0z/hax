@@ -952,13 +952,22 @@ static enum input_action decode(const char *sequence)
         .bytes = (const unsigned char *)sequence,
         .len = strlen(sequence),
     };
-    return input_core_decode_escape(read_byte_array, &reader);
+    return input_core_decode_escape(read_byte_array, &reader, NULL);
+}
+
+static enum input_action decode_click(const char *sequence, struct input_click *click)
+{
+    struct byte_array_reader reader = {
+        .bytes = (const unsigned char *)sequence,
+        .len = strlen(sequence),
+    };
+    return input_core_decode_escape(read_byte_array, &reader, click);
 }
 
 static enum input_action decode_bytes(const unsigned char *sequence, size_t len)
 {
     struct byte_array_reader reader = {.bytes = sequence, .len = len};
-    return input_core_decode_escape(read_byte_array, &reader);
+    return input_core_decode_escape(read_byte_array, &reader, NULL);
 }
 
 /* A prompt-wide editor for vertical-motion tests: 3-cell prompt, 40 columns. */
@@ -1240,6 +1249,48 @@ static void test_decode_paste_begin(void)
     EXPECT(decode("[200~") == INPUT_ACTION_PASTE_BEGIN);
 }
 
+static void test_decode_mouse_press(void)
+{
+    /* SGR 1006: CSI < button ; col ; row M. Coordinates surface verbatim. */
+    struct input_click click = {0, 0};
+    EXPECT(decode_click("[<0;12;7M", &click) == INPUT_ACTION_MOUSE_CLICK);
+    EXPECT(click.row == 7 && click.col == 12);
+
+    /* A NULL out-parameter declines the payload but still consumes the event. */
+    EXPECT(decode("[<0;3;4M") == INPUT_ACTION_MOUSE_CLICK);
+}
+
+static void test_decode_mouse_swallowed(void)
+{
+    struct input_click click = {0, 0};
+
+    /* Release ('m'), press-hold variants, drag motion (32+), and wheel (64/65)
+     * are consumed with no action and no payload (S10). */
+    EXPECT(decode_click("[<0;5;5m", &click) == INPUT_ACTION_NONE);
+    EXPECT(decode_click("[<32;5;5M", &click) == INPUT_ACTION_NONE);
+    EXPECT(decode_click("[<64;5;5M", &click) == INPUT_ACTION_NONE);
+    EXPECT(decode_click("[<65;5;5M", &click) == INPUT_ACTION_NONE);
+
+    /* Right and middle press decode but act as no-ops in v1. */
+    EXPECT(decode_click("[<1;5;5M", &click) == INPUT_ACTION_NONE);
+    EXPECT(decode_click("[<2;5;5M", &click) == INPUT_ACTION_NONE);
+
+    /* Malformed mouse-ish sequences still return NONE without leaking. */
+    EXPECT(decode_click("[<0;5M", &click) == INPUT_ACTION_NONE);
+    EXPECT(decode_click("[<x;5;5M", &click) == INPUT_ACTION_NONE);
+}
+
+static void test_decode_cursor_report(void)
+{
+    /* DSR reply: CSI row ; col R. */
+    struct input_click pos = {0, 0};
+    EXPECT(decode_click("[12;37R", &pos) == INPUT_ACTION_CURSOR_REPORT);
+    EXPECT(pos.row == 12 && pos.col == 37);
+
+    EXPECT(decode("[12;37R") == INPUT_ACTION_CURSOR_REPORT);
+    EXPECT(decode("[42R") == INPUT_ACTION_NONE);
+}
+
 static void test_decode_partial_and_unknown(void)
 {
     EXPECT(decode("") == INPUT_ACTION_NONE);
@@ -1264,7 +1315,7 @@ static void test_decode_overflow_and_runaway(void)
         .position = 0,
         .len = sizeof(overflow_sequence),
     };
-    EXPECT(input_core_decode_escape(read_byte_array, &reader) == INPUT_ACTION_NONE);
+    EXPECT(input_core_decode_escape(read_byte_array, &reader, NULL) == INPUT_ACTION_NONE);
     EXPECT(reader.position == sizeof(overflow_sequence));
 
     /* A missing final byte stops at the read cap instead of consuming indefinitely. */
@@ -1318,6 +1369,82 @@ static void test_ghost_text_is_sanitized(void)
     struct input *in = new_with("/preset ");
     in->candidates = xstrdup("  evil\x1b[2Jx fast");
     expect_ghost(in, "  evil?[2Jx fast");
+    input_free(in);
+}
+
+static void test_cursor_hit_test_row_and_col(void)
+{
+    struct input *in = new_editor("aaa\nbbbb\nccccc"); /* rows 5-7 on screen */
+    in->edit_area_screen_row = 5;
+    in->painted_rows = 3;
+
+    /* Row 2 is "ccccc" starting at layout column 3; the click column is the
+     * 1-based terminal column, so raw column 6 is layout column 5, the
+     * boundary before the third 'c' (offset 9 + 2). */
+    struct input_click click = {.row = 7, .col = 6};
+    EXPECT(input_core_cursor_hit_test(in, &click) == 11);
+
+    /* Left of the continuation indent clamps to the row start (S8). */
+    click.col = 1;
+    EXPECT(input_core_cursor_hit_test(in, &click) == 9);
+
+    /* Right of the row's end lands at the row's end (buffer length). */
+    click.col = 30;
+    EXPECT(input_core_cursor_hit_test(in, &click) == 14);
+    /* clang-format off */
+    /* offsets: a0 a1 a2 \n3 b4 b5 b6 b7 \n8 c9 c10 c11 c12 c13 */
+    /* clang-format on */
+
+    /* Row 0 keeps the prompt cells: any column left of the text starts it. */
+    click.row = 5;
+    click.col = 1;
+    EXPECT(input_core_cursor_hit_test(in, &click) == 0);
+    click.col = 5;
+    EXPECT(input_core_cursor_hit_test(in, &click) == 1);
+
+    input_free(in);
+}
+
+static void test_cursor_hit_test_rejects_outside_rows(void)
+{
+    struct input *in = new_editor("aaa\nbbbb\nccccc");
+    in->edit_area_screen_row = 5; /* painted rows 5, 6, 7 */
+
+    struct input_click above = {.row = 4, .col = 5};
+    EXPECT(input_core_cursor_hit_test(in, &above) == INPUT_HIT_INVALID);
+
+    struct input_click below = {.row = 8, .col = 5};
+    EXPECT(input_core_cursor_hit_test(in, &below) == INPUT_HIT_INVALID);
+
+    /* Without an anchor no click may teleport (S9). */
+    struct input *unanchored = new_editor("aaa\nbbbb\nccccc");
+    struct input_click anywhere = {.row = 6, .col = 5};
+    EXPECT(input_core_cursor_hit_test(unanchored, &anywhere) == INPUT_HIT_INVALID);
+
+    input_free(unanchored);
+    input_free(in);
+}
+
+static void test_cursor_hit_test_clipped_window(void)
+{
+    /* Clipped paints put an indicator row above the window, which is not text. */
+    struct input *in = new_editor("1\n2\n3\n4\n5\n6");
+    in->edit_area_screen_row = 2;
+    in->previous_paint_clipped = 1;
+    in->window_top = 4;
+    in->painted_rows = 4; /* indicator, rows 4 and 5, indicator */
+
+    struct input_click indicator = {.row = 2, .col = 4};
+    EXPECT(input_core_cursor_hit_test(in, &indicator) == INPUT_HIT_INVALID);
+
+    struct input_click row4 = {.row = 3, .col = 4};
+    EXPECT(input_core_cursor_hit_test(in, &row4) == 8);
+    struct input_click row5 = {.row = 4, .col = 4};
+    EXPECT(input_core_cursor_hit_test(in, &row5) == 10);
+
+    struct input_click below = {.row = 5, .col = 4};
+    EXPECT(input_core_cursor_hit_test(in, &below) == INPUT_HIT_INVALID);
+
     input_free(in);
 }
 
@@ -1406,10 +1533,16 @@ int main(void)
     test_decode_iterm_meta_prefix();
     test_decode_meta_letters();
     test_decode_paste_begin();
+    test_decode_mouse_press();
+    test_decode_mouse_swallowed();
+    test_decode_cursor_report();
     test_decode_partial_and_unknown();
     test_decode_overflow_and_runaway();
 
     test_ghost_text_precedence();
     test_ghost_text_is_sanitized();
+    test_cursor_hit_test_row_and_col();
+    test_cursor_hit_test_rejects_outside_rows();
+    test_cursor_hit_test_clipped_window();
     T_REPORT();
 }

@@ -178,6 +178,7 @@ e2e_scenarios = [
     'repl_complete',
     'repl_editor',
     'repl_interrupt',
+    'repl_mouse',
     'repl_smoke',
 ]
 

@@ -34,6 +34,7 @@
 #include "text/width.h"
 
 #define ESC_TIMEOUT_MS 50
+#define ANCHOR_WAIT_MS 500 /* patience for one DSR cursor report round trip */
 
 static void terminal_size(int *columns, int *rows)
 {
@@ -96,7 +97,7 @@ static void enable_raw_mode(struct input *in)
     if (tcsetattr(STDIN_FILENO, TCSADRAIN, &raw) < 0)
         return;
 
-    fputs(ANSI_BRACKETED_PASTE_ENABLE, stdout);
+    fputs(ANSI_BRACKETED_PASTE_ENABLE ANSI_MOUSE_ENABLE, stdout);
     fflush(stdout);
     in->raw_active = 1;
 }
@@ -105,10 +106,11 @@ static void disable_raw_mode(struct input *in)
 {
     if (!in->raw_active)
         return;
-    fputs(ANSI_BRACKETED_PASTE_DISABLE, stdout);
+    fputs(ANSI_MOUSE_DISABLE ANSI_BRACKETED_PASTE_DISABLE, stdout);
     fflush(stdout);
     tcsetattr(STDIN_FILENO, TCSADRAIN, &in->saved_termios);
     in->raw_active = 0;
+    in->edit_area_screen_row = -1;
 }
 
 /* ---------------- input primitives ---------------- */
@@ -242,6 +244,10 @@ static void apply_action(struct input *in, enum input_action a)
     switch (a) {
     case INPUT_ACTION_NONE:
         return;
+    case INPUT_ACTION_MOUSE_CLICK:
+    case INPUT_ACTION_CURSOR_REPORT:
+        /* Resolved in handle_escape_sequence, which owns the click payload and anchor. */
+        return;
     case INPUT_ACTION_MOVE_LEFT:
         input_core_move_left(in);
         return;
@@ -289,9 +295,68 @@ static void apply_action(struct input *in, enum input_action a)
     }
 }
 
+static void place_cursor_at_click(struct input *in, const struct input_click *click)
+{
+    size_t offset = input_core_cursor_hit_test(in, click);
+    if (offset == INPUT_HIT_INVALID)
+        return;
+    in->cursor = offset;
+    in->desired_col = -1;
+}
+
+/* Anchor the edit area to absolute screen rows so clicks can be hit-tested: ask the
+ * terminal where the cursor is and subtract where the caret sits within the painted
+ * frame. Any repaint moves the area, so each click after one pays the round trip —
+ * milliseconds locally, and keys typed meanwhile are replayed in order by the main
+ * loop. Terminals that never answer DSR stop being asked after two tries. */
+static void handle_anchor_click(struct input *in, const struct input_click *click)
+{
+    fputs(ANSI_CURSOR_POSITION_REQUEST, stdout);
+    fflush(stdout);
+
+    for (int waits = 0; waits < 3; waits++) {
+        unsigned char byte;
+        int r = read_byte_timeout(&byte, ANCHOR_WAIT_MS);
+        if (r <= 0) {
+            if (++in->anchor_timeouts >= 2)
+                return; /* this terminal will not answer; ignore later clicks */
+            continue;
+        }
+        if (byte == 0x1b) {
+            struct input_click reply;
+            enum input_action a = input_core_decode_escape(read_escape_byte, NULL, &reply);
+            if (a == INPUT_ACTION_CURSOR_REPORT) {
+                int top = reply.row - in->painted_cursor_row;
+                if (top >= 1) {
+                    in->edit_area_screen_row = top;
+                    place_cursor_at_click(in, click);
+                }
+                return;
+            }
+            if (a == INPUT_ACTION_PASTE_BEGIN)
+                handle_bracketed_paste(in);
+            else if (a != INPUT_ACTION_NONE)
+                apply_action(in, a); /* a key in flight keeps its order */
+            continue;
+        }
+        if (in->deferred_key < 0)
+            in->deferred_key = byte;
+    }
+}
+
 static void handle_escape_sequence(struct input *in)
 {
-    apply_action(in, input_core_decode_escape(read_escape_byte, NULL));
+    struct input_click click;
+    enum input_action action = input_core_decode_escape(read_escape_byte, NULL, &click);
+
+    if (action == INPUT_ACTION_MOUSE_CLICK) {
+        if (in->edit_area_screen_row >= 0)
+            place_cursor_at_click(in, &click);
+        else
+            handle_anchor_click(in, &click);
+        return;
+    }
+    apply_action(in, action);
 }
 
 /* ---------------- render / paint ---------------- */
@@ -450,6 +515,7 @@ static void paint(struct input *in)
     in->previous_paint_clipped = clipped;
     in->window_top = first_row;
     in->top_indicator_width = top_indicator_width;
+    in->edit_area_screen_row = -1; /* the anchor describes the previous frame */
 }
 
 /* Record row widths under the old geometry for resize reflow calculations. */
@@ -493,6 +559,7 @@ static int handle_resize(struct input *in)
     int old_columns = in->display_columns;
     in->display_columns = new_columns;
     in->terminal_rows = new_rows;
+    in->edit_area_screen_row = -1; /* geometry moved; re-anchor on the next click */
     if (new_columns == old_columns) {
         if (new_rows > 0 && in->painted_cursor_row >= new_rows)
             in->painted_cursor_row = new_rows - 1;
@@ -1007,7 +1074,8 @@ static enum history_search_outcome search_history(struct input *in)
             goto done;
         }
         if (key == 0x1b) {
-            if (input_core_decode_escape(read_escape_byte, NULL) == INPUT_ACTION_PASTE_BEGIN) {
+            if (input_core_decode_escape(read_escape_byte, NULL, NULL) ==
+                INPUT_ACTION_PASTE_BEGIN) {
                 read_bracketed_paste(paste_into_query, &query);
                 recompute_history_match(in, &query, direction, &match, &no_match);
                 continue;
@@ -1368,6 +1436,8 @@ char *input_readline(struct input *in, const char *prompt)
     in->window_top = 0;
     in->top_indicator_width = 0;
     in->desired_col = -1;
+    in->edit_area_screen_row = -1;
+    in->deferred_key = -1;
 
     fflush(stdout);
     enable_raw_mode(in);
@@ -1378,10 +1448,16 @@ char *input_readline(struct input *in, const char *prompt)
 
     while (!submit && !eof) {
         unsigned char c;
-        int r = read_byte_blocking(&c);
-        if (r <= 0) {
-            eof = 1;
-            break;
+        if (in->deferred_key >= 0) {
+            /* A key typed during the anchor wait, replayed after it. */
+            c = (unsigned char)in->deferred_key;
+            in->deferred_key = -1;
+        } else {
+            int r = read_byte_blocking(&c);
+            if (r <= 0) {
+                eof = 1;
+                break;
+            }
         }
 
         /* Resize recovery needs the buffer state that produced the current screen. */

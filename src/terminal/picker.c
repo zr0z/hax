@@ -642,7 +642,7 @@ static enum picker_input_result process_input_byte(struct picker_core *core, uns
         if (read_byte_timeout(&next_byte, ESC_TIMEOUT_MS) <= 0)
             return PICKER_INPUT_CANCEL;
         struct escape_reader reader = {.pending_byte = next_byte};
-        enum input_action action = input_core_decode_escape(read_escape_byte, &reader);
+        enum input_action action = input_core_decode_escape(read_escape_byte, &reader, NULL);
         apply_escape_action(core, action);
         return PICKER_INPUT_CONTINUE;
     }

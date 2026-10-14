@@ -40,6 +40,16 @@
 #define ANSI_BRACKETED_PASTE_ENABLE  ANSI_CSI "?2004h"
 #define ANSI_BRACKETED_PASTE_DISABLE ANSI_CSI "?2004l"
 
+/* SGR (1006) mouse tracking with button-event reporting (1000): presses and releases are
+ * reported, drags only while a button is held, and the wheel scrolls nothing else. Terminals
+ * without SGR support ignore 1006 and report X10-style coordinates instead. */
+#define ANSI_MOUSE_ENABLE  ANSI_CSI "?1000h" ANSI_CSI "?1006h"
+#define ANSI_MOUSE_DISABLE ANSI_CSI "?1006l" ANSI_CSI "?1000l"
+
+/* DSR cursor position request: the terminal answers "CSI row ; column R" at the current
+ * cursor position, in stream order after all earlier output. */
+#define ANSI_CURSOR_POSITION_REQUEST ANSI_CSI "6n"
+
 /* DEC mode 2026 presents output between BEGIN and END as one frame. Unsupported terminals ignore
  * it; tty restoration must emit END in case output was interrupted mid-frame. */
 #define ANSI_SYNC_BEGIN ANSI_CSI "?2026h"

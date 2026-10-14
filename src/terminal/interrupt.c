@@ -264,7 +264,7 @@ static void restore_terminal(void)
     }
     if (watcher.interactive_terminal) {
         static const char restore_sequence[] =
-            ANSI_BRACKETED_PASTE_DISABLE ANSI_CURSOR_SHOW ANSI_SYNC_END;
+            ANSI_MOUSE_DISABLE ANSI_BRACKETED_PASTE_DISABLE ANSI_CURSOR_SHOW ANSI_SYNC_END;
         (void)!write(STDOUT_FILENO, restore_sequence, sizeof(restore_sequence) - 1);
     }
 }

@@ -7,6 +7,12 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- Click inside the prompt to move the cursor to the clicked cell. Mouse reporting is active only
+  while the prompt is editable; releases, drags, and the wheel are ignored, and terminals that
+  offer a selection key (usually shift-drag) keep full copy behavior.
+
 ### Changed
 
 - Up/Down move the cursor between the lines of a multi-line prompt — hard newlines and soft-wrapped

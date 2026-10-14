@@ -63,6 +63,15 @@ struct input {
     int desired_col;
     size_t desired_cursor;
 
+    /* 1-based screen row of the topmost painted row of the edit area — the
+     * clip indicator row when clipped, layout row 0 otherwise. Valid only for
+     * the frame of the last paint: painting invalidates it. -1 = unknown. */
+    int edit_area_screen_row;
+    /* A key consumed while waiting for a DSR reply, replayed by the main loop. -1 = none. */
+    int deferred_key;
+    /* Terminals that never answer DSR stop being asked after two tries. */
+    int anchor_timeouts;
+
     /* Terminal state */
     struct termios saved_termios;
     int raw_active;
@@ -136,6 +145,21 @@ size_t input_core_line_end(const struct input *in);
 /* Byte offset painted at visual (row, col) of the editor's own prompt/columns
  * geometry; a column past the row's content lands at the row's end. */
 size_t input_core_offset_at(const struct input *in, int row, int col);
+
+/* A 1-based terminal cell, carried by mouse clicks and DSR cursor reports. */
+struct input_click {
+    int row;
+    int col;
+};
+
+/* Click hit-test failure: no anchor or the click missed the painted area. Distinct from every
+ * byte offset, since buffers cannot reach SIZE_MAX. */
+#define INPUT_HIT_INVALID ((size_t)-1)
+
+/* Byte offset under a 1-based screen (row, col) mouse report, or INPUT_HIT_INVALID when the
+ * area is not anchored or the click lands outside it. Requires the DSR-anchored screen row
+ * and the painted window state, so it never guesses where the prompt is. */
+size_t input_core_cursor_hit_test(const struct input *in, const struct input_click *click);
 /* Vertical motion across visual rows with a sticky desired column; at the
  * first/last row the keys fall through to history recall. */
 void input_core_move_up(struct input *in);
@@ -243,14 +267,20 @@ enum input_action {
     INPUT_ACTION_KILL_WORD_FWD,
     INPUT_ACTION_KILL_WORD_BACK_ALNUM,
     INPUT_ACTION_INSERT_NEWLINE,
-    INPUT_ACTION_PASTE_BEGIN, /* body follows in the byte stream */
+    INPUT_ACTION_PASTE_BEGIN,   /* body follows in the byte stream */
+    INPUT_ACTION_MOUSE_CLICK,   /* press; coordinates surface through the out-parameter */
+    INPUT_ACTION_CURSOR_REPORT, /* DSR reply; row and column the same way */
 };
 
 /* Return 0..255, or -1 when no byte is available. */
 typedef int (*input_byte_reader)(void *user);
 
 /* Decode bytes following an already-consumed ESC. Reads are bounded; unknown, partial, or
- * abandoned sequences return INPUT_ACTION_NONE. */
-enum input_action input_core_decode_escape(input_byte_reader read, void *user);
+ * abandoned sequences return INPUT_ACTION_NONE. With `out`, mouse clicks and cursor reports
+ * deliver their coordinates there; every other action leaves it untouched. Release, drag, and
+ * wheel reports decode to INPUT_ACTION_NONE but are consumed so they cannot leak as text.
+ * Pass NULL from callers that do not consume coordinates. */
+enum input_action input_core_decode_escape(input_byte_reader read, void *user,
+                                           struct input_click *out);
 
 #endif /* HAX_TERMINAL_INPUT_CORE_H */

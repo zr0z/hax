@@ -19,6 +19,8 @@ struct input *input_new(void)
     in->cap = 64;
     in->buf[0] = '\0';
     in->desired_col = -1;
+    in->edit_area_screen_row = -1;
+    in->deferred_key = -1;
     return in;
 }
 
@@ -310,6 +312,32 @@ size_t input_core_offset_at(const struct input *in, int row, int col)
     if (at.cursor_row > row && lo > 0)
         lo--; /* past the row's content: the boundary offset still paints on it */
     return lo;
+}
+
+size_t input_core_cursor_hit_test(const struct input *in, const struct input_click *click)
+{
+    if (in->edit_area_screen_row < 0 || click->row < 1 || click->col < 1)
+        return INPUT_HIT_INVALID;
+
+    /* The anchor marks the topmost painted row: the clip indicator when the paint was
+     * clipped, layout row 0 otherwise. painted_rows spans the whole painted frame. */
+    int indicator_rows = in->previous_paint_clipped ? 1 : 0;
+    int text_row = click->row - in->edit_area_screen_row - indicator_rows;
+    if (text_row < 0)
+        return INPUT_HIT_INVALID;
+
+    if (in->previous_paint_clipped) {
+        int visible = in->painted_rows - 2; /* the frame adds an indicator above and below */
+        if (visible < 1)
+            visible = 1;
+        text_row += in->window_top;
+        if (text_row >= in->window_top + visible)
+            return INPUT_HIT_INVALID;
+    } else if (text_row >= in->painted_rows) {
+        return INPUT_HIT_INVALID;
+    }
+
+    return input_core_offset_at(in, text_row, click->col - 1);
 }
 
 /* Vertical motion with a sticky desired column: repeated Up/Down between rows of
@@ -902,7 +930,38 @@ static enum input_action arrow_to_action(char final, int word)
     return INPUT_ACTION_NONE;
 }
 
-enum input_action input_core_decode_escape(input_byte_reader read, void *user)
+static int parse_two_params(const char *seq, int *first, int *second)
+{
+    int a = 0;
+    int digits = 0;
+    int i = 0;
+    while (i < 12 && seq[i] >= '0' && seq[i] <= '9') {
+        a = a * 10 + (int)(seq[i++] - '0');
+        digits++;
+        if (a > 99999)
+            return 0;
+    }
+    if (!digits || i >= 12 || seq[i] != ';')
+        return 0;
+    int b = 0;
+    digits = 0;
+    i++;
+    while (seq[i] >= '0' && seq[i] <= '9') {
+        b = b * 10 + (int)(seq[i] - '0');
+        digits++;
+        i++;
+        if (b > 99999)
+            return 0;
+    }
+    if (!digits)
+        return 0;
+    *first = a;
+    *second = b;
+    return i;
+}
+
+enum input_action input_core_decode_escape(input_byte_reader read, void *user,
+                                           struct input_click *out)
 {
     int b = read(user);
     if (b < 0)
@@ -925,6 +984,49 @@ enum input_action input_core_decode_escape(input_byte_reader read, void *user)
         int n = read_csi_seq(read, user, seq, sizeof(seq));
         if (n < 0)
             return INPUT_ACTION_NONE;
+
+        /* SGR mouse reports: CSI < button ; column ; row M (press) or m (release). Only a
+         * plain left press moves the cursor; the rest are consumed so tracking cannot write
+         * into the buffer. */
+        if (n >= 1 && seq[0] == '<') {
+            int button = 0;
+            int digits = 0;
+            int i = 1;
+            while (i < 12 && seq[i] >= '0' && seq[i] <= '9') {
+                button = button * 10 + (int)(seq[i++] - '0');
+                digits++;
+                if (button > 999)
+                    return INPUT_ACTION_NONE;
+            }
+            char final = seq[n - 1];
+            if (final == 'M' && digits && i + 1 < n && seq[i] == ';') {
+                int col = 0;
+                int row = 0;
+                int len = parse_two_params(seq + i + 1, &col, &row);
+                if (len == n - 1 - i - 1 && button == 0) {
+                    if (out) {
+                        out->row = row;
+                        out->col = col;
+                    }
+                    return INPUT_ACTION_MOUSE_CLICK;
+                }
+            }
+            return INPUT_ACTION_NONE;
+        }
+
+        /* DSR cursor position report: CSI row ; column R. A lone parameter is no row. */
+        if (n >= 1 && seq[n - 1] == 'R') {
+            int row = 0;
+            int col = 0;
+            if (parse_two_params(seq, &row, &col) == n - 1) {
+                if (out) {
+                    out->row = row;
+                    out->col = col;
+                }
+                return INPUT_ACTION_CURSOR_REPORT;
+            }
+            return INPUT_ACTION_NONE;
+        }
 
         if (n == 1) {
             /* rxvt lowercase CSI arrows denote Shift, which remains character motion. */

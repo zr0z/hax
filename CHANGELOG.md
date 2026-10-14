@@ -9,9 +9,9 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
-- Click inside the prompt to move the cursor to the clicked cell. Mouse reporting is active only
-  while the prompt is editable; releases, drags, and the wheel are ignored, and terminals that
-  offer a selection key (usually shift-drag) keep full copy behavior.
+- Click inside the prompt to move the cursor to the clicked cell. Mouse reporting is on only
+  while the draft has text, so an empty prompt keeps native terminal drag-select and copy —
+  including in terminal multiplexers; releases, drags, and the wheel are ignored.
 
 ### Changed
 

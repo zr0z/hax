@@ -118,7 +118,7 @@ The editor supports common readline-style movement and history keys. Notable hax
 | Enter | Submit; at a paused empty prompt, continue without adding a message. |
 | Shift-Enter | Insert a newline if the terminal sends LF for it. |
 | Up / Down | Move between lines of a multi-line prompt; recall previous/next prompts at the first and last line. |
-| Left click | Move the cursor to a clicked cell of the prompt. Terminals report the mouse while the prompt is active; copy usually still works via a select key or shift-drag. |
+| Left click | Move the cursor to a clicked cell of a prompt that has text. Mouse reporting rides the draft, so an empty prompt and everything outside it keep native terminal select-copy. |
 | Ctrl-R | Search prompt history. |
 | Esc | Pause after the current step so you can steer. |
 | Esc Esc | Interrupt the model or running tool immediately. |

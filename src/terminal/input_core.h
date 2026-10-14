@@ -71,6 +71,9 @@ struct input {
     int deferred_key;
     /* Terminals that never answer DSR stop being asked after two tries. */
     int anchor_timeouts;
+    /* 1 while the terminal reports mouse buttons. Reporting is on only while the
+     * draft has text so multiplexers keep native drag-select on an idle prompt. */
+    int mouse_active;
 
     /* Terminal state */
     struct termios saved_termios;
@@ -154,7 +157,7 @@ struct input_click {
 
 /* Click hit-test failure: no anchor or the click missed the painted area. Distinct from every
  * byte offset, since buffers cannot reach SIZE_MAX. */
-#define INPUT_HIT_INVALID ((size_t)-1)
+#define INPUT_HIT_INVALID ((size_t) - 1)
 
 /* Byte offset under a 1-based screen (row, col) mouse report, or INPUT_HIT_INVALID when the
  * area is not anchored or the click lands outside it. Requires the DSR-anchored screen row

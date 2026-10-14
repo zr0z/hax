@@ -1,7 +1,8 @@
-"""Click-to-cursor in the readline draft. While the edit area is active, hax turns on
-SGR mouse reporting (1000+1006): a left press inside the painted draft anchors the area
-with a cursor-position report and moves the caret to the clicked cell; release and
-wheel reports are consumed without touching the buffer."""
+"""Click-to-cursor in the readline draft. While a draft has text, hax turns on SGR
+mouse reporting (1000+1006) — off on the idle prompt so native drag-select keeps
+working: a left press inside the painted draft anchors the area with a
+cursor-position report and moves the caret to the clicked cell; release and wheel
+reports are consumed without touching the buffer."""
 
 import harness
 
@@ -24,11 +25,21 @@ def sgr_event(term: harness.Terminal, button: int, row: int, col: int) -> None:
     term._run("send-keys", "-H", *(f"{b:02x}" for b in seq))
 
 
+def mouse_reporting(term: harness.Terminal) -> bool:
+    """Whether the pane's terminal has mouse reporting switched on by an app."""
+    out = term._run("display-message", "-p", "-t", "hax", "#{mouse_any_flag}")
+    return out.strip() == "1"
+
+
 def test_click_places_cursor_in_draft():
     term = harness.Terminal(MOCK, extra_env={"HAX_NO_SESSION": "0"})
     term.wait_for("❯")
 
+    # Reporting stays off on the idle prompt so terminals and multiplexers keep
+    # native drag-select; it turns on with the draft.
+    harness.expect(not mouse_reporting(term), "an idle prompt does not capture the mouse")
     term.type("ac")  # caret after "c"; prompt cells: "❯" col 1, " " col 2, text from 3
+    harness.expect(mouse_reporting(term), "a draft with text captures the mouse")
     screen = term.screen()
     prompt_row = next(i for i, line in enumerate(screen.splitlines()) if "❯" in line) + 1
 
@@ -56,6 +67,10 @@ def test_click_places_cursor_in_draft():
     term.wait_for("done")
     screen = term.screen()
     harness.expect("aXYZc" in screen, "the submitted draft survived every mouse report")
+
+    # The next prompt starts empty, so reporting goes back off.
+    term.wait_for("❯")
+    harness.expect(not mouse_reporting(term), "the idle prompt after a submit releases the mouse")
 
     term.send("C-d")
     harness.expect(term.wait_exit() == 0, "Ctrl-D exits after the scenario")

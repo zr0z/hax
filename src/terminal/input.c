@@ -97,7 +97,7 @@ static void enable_raw_mode(struct input *in)
     if (tcsetattr(STDIN_FILENO, TCSADRAIN, &raw) < 0)
         return;
 
-    fputs(ANSI_BRACKETED_PASTE_ENABLE ANSI_MOUSE_ENABLE, stdout);
+    fputs(ANSI_BRACKETED_PASTE_ENABLE, stdout);
     fflush(stdout);
     in->raw_active = 1;
 }
@@ -106,10 +106,13 @@ static void disable_raw_mode(struct input *in)
 {
     if (!in->raw_active)
         return;
-    fputs(ANSI_MOUSE_DISABLE ANSI_BRACKETED_PASTE_DISABLE, stdout);
+    if (in->mouse_active)
+        fputs(ANSI_MOUSE_DISABLE, stdout);
+    fputs(ANSI_BRACKETED_PASTE_DISABLE, stdout);
     fflush(stdout);
     tcsetattr(STDIN_FILENO, TCSADRAIN, &in->saved_termios);
     in->raw_active = 0;
+    in->mouse_active = 0;
     in->edit_area_screen_row = -1;
 }
 
@@ -430,6 +433,17 @@ static int edit_area_rows(int terminal_rows)
  * indicator rows and at least one content row. */
 static void paint(struct input *in)
 {
+    /* Mouse reporting rides the draft: off on an idle prompt so terminals and
+     * multiplexers keep native drag-select, on as soon as there is text to
+     * click into. Every buffer edit repaints, so this lands before the next
+     * blocking read and no click can arrive against the wrong mode. */
+    int want_mouse = in->len > 0;
+    if (want_mouse != in->mouse_active) {
+        fputs(want_mouse ? ANSI_MOUSE_ENABLE : ANSI_MOUSE_DISABLE, stdout);
+        fflush(stdout);
+        in->mouse_active = want_mouse;
+    }
+
     int prompt_width = input_core_prompt_width(in->prompt);
     int continuation_column = in->continuation_at_column_zero ? 0 : prompt_width;
     struct input_layout layout;

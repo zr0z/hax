@@ -1302,6 +1302,89 @@ static void test_decode_partial_and_unknown(void)
     EXPECT(decode("OP") == INPUT_ACTION_NONE); /* F1 */
 }
 
+static void test_decode_csi_u(void)
+{
+    /* Kitty key reports: CSI codepoint[;modifier]u, modifier = 1 + bitmask
+     * (shift 1, alt 2, ctrl 4). The decoder carries them verbatim minus the
+     * implicit 1; a missing modifier means unmodified. */
+    struct input_click key = {0, 0, 0, 0};
+    EXPECT(decode_click("[13;2u", &key) == INPUT_ACTION_CSI_U);
+    EXPECT(key.codepoint == 13 && key.mods == 1); /* Shift+Enter */
+
+    EXPECT(decode_click("[13u", &key) == INPUT_ACTION_CSI_U);
+    EXPECT(key.codepoint == 13 && key.mods == 0);
+
+    EXPECT(decode_click("[97;5u", &key) == INPUT_ACTION_CSI_U);
+    EXPECT(key.codepoint == 97 && key.mods == 4); /* Ctrl+A */
+
+    EXPECT(decode_click("[98;3u", &key) == INPUT_ACTION_CSI_U);
+    EXPECT(key.codepoint == 98 && key.mods == 2); /* Alt+B */
+
+    /* Event-type (`:`) and alternate-key (third `;`) segments are consumed. */
+    EXPECT(decode_click("[13;2:1u", &key) == INPUT_ACTION_CSI_U);
+    EXPECT(key.codepoint == 13 && key.mods == 1);
+    EXPECT(decode_click("[97;2;65u", &key) == INPUT_ACTION_CSI_U);
+    EXPECT(key.codepoint == 97 && key.mods == 1);
+
+    /* A NULL out-parameter declines the payload but still consumes. */
+    EXPECT(decode("[13;2u") == INPUT_ACTION_CSI_U);
+}
+
+static void test_decode_csi_u_malformed(void)
+{
+    struct input_click key = {0, 0, -1, -1};
+
+    /* No digits, empty, leading semicolon, overflow: consumed with no action. */
+    EXPECT(decode_click("[u", &key) == INPUT_ACTION_NONE);
+    EXPECT(decode_click("[;2u", &key) == INPUT_ACTION_NONE);
+    EXPECT(decode_click("[999999999u", &key) == INPUT_ACTION_NONE);
+    EXPECT(decode("[x;2u") == INPUT_ACTION_NONE);
+
+    /* Zero codepoints are not keys; lock/super modifier bits ride verbatim
+     * into the resolution table, which masks them. */
+    EXPECT(decode_click("[0;2u", &key) == INPUT_ACTION_NONE);
+    EXPECT(decode_click("[13;100u", &key) == INPUT_ACTION_CSI_U);
+    EXPECT(key.mods == 99);
+}
+
+static void test_csi_u_resolution_table(void)
+{
+    /* Shift+Enter and Alt+Enter (with or without Shift) are newlines; a
+     * modified Enter with Ctrl is unbound. */
+    EXPECT(input_core_csi_u_action(13, 1) == INPUT_ACTION_INSERT_NEWLINE);
+    EXPECT(input_core_csi_u_action(13, 2) == INPUT_ACTION_INSERT_NEWLINE);
+    EXPECT(input_core_csi_u_action(13, 3) == INPUT_ACTION_INSERT_NEWLINE);
+    EXPECT(input_core_csi_u_action(13, 4) == INPUT_ACTION_NONE);
+
+    /* The alt-meta table matches the decoder's ESC+byte branch. */
+    EXPECT(input_core_csi_u_action(98, 2) == INPUT_ACTION_MOVE_WORD_LEFT);
+    EXPECT(input_core_csi_u_action(102, 2) == INPUT_ACTION_MOVE_WORD_RIGHT);
+    EXPECT(input_core_csi_u_action(100, 2) == INPUT_ACTION_KILL_WORD_FWD);
+    EXPECT(input_core_csi_u_action(127, 2) == INPUT_ACTION_KILL_WORD_BACK_ALNUM);
+    EXPECT(input_core_csi_u_action(97, 2) == INPUT_ACTION_NONE);
+
+    /* Unmodified functional keys only arrive with a report-all push; they
+     * resolve to the legacy bytes the byte switch already understands. */
+    EXPECT(input_core_csi_u_action(9, 0) == INPUT_ACTION_NONE);
+    EXPECT(input_core_csi_u_legacy(13, 0) == '\r');
+    EXPECT(input_core_csi_u_legacy(9, 0) == '\t');
+    EXPECT(input_core_csi_u_legacy(127, 0) == 0x7f);
+    EXPECT(input_core_csi_u_legacy(13, 1) == -1);
+
+    /* Ctrl chords synthesize the legacy control byte. */
+    EXPECT(input_core_csi_u_legacy(97, 4) == 0x01);  /* Ctrl-A */
+    EXPECT(input_core_csi_u_legacy(99, 4) == 0x03);  /* Ctrl-C */
+    EXPECT(input_core_csi_u_legacy(100, 4) == 0x04); /* Ctrl-D */
+    EXPECT(input_core_csi_u_legacy(103, 4) == 0x07); /* Ctrl-G */
+    EXPECT(input_core_csi_u_legacy(99, 5) == 0x03);  /* Ctrl+Shift+C collapses */
+
+    /* Nothing else synthesizes: Esc, F1, function-key codepoints, Alt letters. */
+    EXPECT(input_core_csi_u_legacy(27, 0) == -1);
+    EXPECT(input_core_csi_u_legacy(57364, 0) == -1);
+    EXPECT(input_core_csi_u_legacy(98, 2) == -1);
+    EXPECT(input_core_csi_u_action(57419, 0) == INPUT_ACTION_NONE); /* Up — never arrives this way */
+}
+
 static void test_decode_overflow_and_runaway(void)
 {
     /* Overflow must still consume through the final byte so the tail cannot leak as text. */
@@ -1536,6 +1619,9 @@ int main(void)
     test_decode_mouse_press();
     test_decode_mouse_swallowed();
     test_decode_cursor_report();
+    test_decode_csi_u();
+    test_decode_csi_u_malformed();
+    test_csi_u_resolution_table();
     test_decode_partial_and_unknown();
     test_decode_overflow_and_runaway();
 

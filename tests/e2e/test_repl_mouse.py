@@ -14,15 +14,13 @@ end-turn
 
 def sgr_press(term: harness.Terminal, row: int, col: int) -> None:
     """Inject a raw SGR press report, as a mouse-tracking terminal would emit it."""
-    seq = f"\x1b[<0;{col};{row}M".encode()
-    term._run("send-keys", "-H", *(f"{b:02x}" for b in seq))
+    term.inject(f"\x1b[<0;{col};{row}M".encode())
 
 
 def sgr_event(term: harness.Terminal, button: int, row: int, col: int) -> None:
     suffix = "m" if button == 999 else "M"
     code = button if button != 999 else 0
-    seq = f"\x1b[<{code};{col};{row}{suffix}".encode()
-    term._run("send-keys", "-H", *(f"{b:02x}" for b in seq))
+    term.inject(f"\x1b[<{code};{col};{row}{suffix}".encode())
 
 
 def mouse_reporting(term: harness.Terminal) -> bool:

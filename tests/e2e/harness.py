@@ -398,6 +398,11 @@ class Terminal:
         """Send named keys in tmux's spelling: Enter, Escape, C-c, BSpace, ..."""
         self._run("send-keys", "-t", "hax", "--", *keys)
 
+    def inject(self, data: bytes) -> None:
+        """Send raw bytes as hex, bypassing tmux's key lookup — for sequences a
+        real terminal would report (SGR mouse, CSI-u keys) but tmux never emits."""
+        self._run("send-keys", "-t", "hax", "-H", *(f"{b:02x}" for b in data))
+
     def screen(self, styles: bool = False) -> str:
         """The visible rows; `styles` keeps the SGR sequences that color and dim them."""
         return self._run("capture-pane", "-p", "-t", "hax", *(["-e"] if styles else []))

@@ -370,6 +370,12 @@ static void handle_escape_sequence(struct input *in)
     struct input_click click;
     enum input_action action = input_core_decode_escape(read_escape_byte, NULL, &click);
 
+    /* The lead byte deferred the exit-arming decision: a Ctrl-C key report leaves
+     * it for the replayed control byte, every other event disarms like a plain key. */
+    if (!(action == INPUT_ACTION_CSI_U &&
+          input_core_csi_u_legacy(click.codepoint, click.mods) == 0x03))
+        in->exit_armed = 0;
+
     if (action == INPUT_ACTION_MOUSE_CLICK) {
         if (in->edit_area_screen_row >= 0)
             place_cursor_at_click(in, &click);
@@ -1500,7 +1506,9 @@ char *input_readline(struct input *in, const char *prompt)
         if (handle_resize(in))
             paint(in);
 
-        if (c != 0x03)
+        /* A key report is one event carried by an escape sequence, so the lead byte
+         * defers the disarm to handle_escape_sequence, where the event is known. */
+        if (c != 0x03 && c != 0x1b)
             in->exit_armed = 0;
         if (c != 0x09)
             in->last_key_was_tab = 0;

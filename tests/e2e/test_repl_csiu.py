@@ -52,4 +52,40 @@ def test_ctrl_chord_key_report_replays_the_legacy_byte():
     harness.expect(term.wait_exit() == 0, "Ctrl-D exits after the scenario")
 
 
+def test_double_ctrl_c_key_report_quits():
+    term = harness.Terminal(MOCK, extra_env={"HAX_NO_SESSION": "0"})
+    term.wait_for("❯")
+
+    # Ctrl-C twice on an empty prompt quits, whether it arrives as ^C or as a
+    # key report: the escape transporting the report must not disarm the arming.
+    term.inject(b"\x1b[99;5u")
+    term.inject(b"\x1b[99;5u")
+    harness.expect(term.wait_exit() == 0, "two Ctrl-C key reports quit on an empty prompt")
+
+
+def test_escape_event_disarms_exit_arming():
+    term = harness.Terminal(MOCK, extra_env={"HAX_NO_SESSION": "0"})
+    term.wait_for("❯")
+
+    # A Ctrl-C report arms, like ^C.
+    term.inject(b"\x1b[99;5u")
+    term.wait_for("ctrl+c again to exit")
+
+    # An escape-transported event that does nothing (Page Up) must still disarm:
+    # the lead byte alone may not carry the arming across, or two Ctrl-C reports
+    # separated by any key would quit. Re-arming shows the hint again, and the
+    # session has to be alive to paint it.
+    term.inject(b"\x1b[5~")
+    term.inject(b"\x1b[99;5u")
+    term.type("x")
+    term.wait_for("❯ x")
+
+    # Disarmed again by the keystroke: clear, arm, quit — the legacy sequence.
+    term.send("C-c")
+    term.inject(b"\x1b[99;5u")
+    term.wait_for("ctrl+c again to exit")
+    term.inject(b"\x1b[99;5u")
+    harness.expect(term.wait_exit() == 0, "the second Ctrl-C key report quits")
+
+
 harness.main(globals())

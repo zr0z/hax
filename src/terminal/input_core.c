@@ -1028,6 +1028,45 @@ enum input_action input_core_decode_escape(input_byte_reader read, void *user,
             return INPUT_ACTION_NONE;
         }
 
+        /* Kitty key report: CSI codepoint[;modifier[;...]]u with event-type `:`
+         * segments anywhere. The modifier arrives as 1 + bitmask; it is carried
+         * as the bitmask here, so a missing one means unmodified. Resolution to
+         * actions or legacy bytes is the consumer's table. */
+        if (n >= 1 && seq[n - 1] == 'u') {
+            int codepoint = 0;
+            int digits = 0;
+            int i = 0;
+            while (i < n && seq[i] >= '0' && seq[i] <= '9') {
+                codepoint = codepoint * 10 + (int)(seq[i++] - '0');
+                digits++;
+                if (codepoint > 99999)
+                    return INPUT_ACTION_NONE;
+            }
+            if (!digits || i >= n || (seq[i] != ';' && i != n - 1) || codepoint == 0)
+                return INPUT_ACTION_NONE;
+            int mods = 0;
+            if (seq[i] == ';') {
+                int value = 0;
+                int mod_digits = 0;
+                for (i++; i < n && (seq[i] == ':' || (seq[i] >= '0' && seq[i] <= '9')); i++) {
+                    if (seq[i] == ':')
+                        break;
+                    value = value * 10 + (int)(seq[i] - '0');
+                    mod_digits++;
+                    if (value > 9999)
+                        return INPUT_ACTION_NONE;
+                }
+                if (!mod_digits)
+                    return INPUT_ACTION_NONE;
+                mods = value > 0 ? value - 1 : 0;
+            }
+            if (out) {
+                out->codepoint = codepoint;
+                out->mods = mods;
+            }
+            return INPUT_ACTION_CSI_U;
+        }
+
         if (n == 1) {
             /* rxvt lowercase CSI arrows denote Shift, which remains character motion. */
             char final = seq[0];
@@ -1105,4 +1144,62 @@ enum input_action input_core_decode_escape(input_byte_reader read, void *user,
         return INPUT_ACTION_KILL_WORD_BACK_ALNUM;
     }
     return INPUT_ACTION_NONE;
+}
+
+#define CSI_U_MOD_SHIFT 1
+#define CSI_U_MOD_ALT   2
+#define CSI_U_MOD_CTRL  4
+
+enum input_action input_core_csi_u_action(int codepoint, int mods)
+{
+    mods &= CSI_U_MOD_SHIFT | CSI_U_MOD_ALT | CSI_U_MOD_CTRL;
+
+    /* Shift+Enter or Alt+Enter (with or without Shift) is the newline the legacy
+     * byte path cannot deliver; Ctrl combinations stay unbound. */
+    if (codepoint == 13) {
+        if (mods != 0 && (mods & CSI_U_MOD_CTRL) == 0)
+            return INPUT_ACTION_INSERT_NEWLINE;
+        return INPUT_ACTION_NONE;
+    }
+
+    /* The Alt-meta table, mirroring the decoder's ESC+byte branch. */
+    if (mods == CSI_U_MOD_ALT) {
+        switch (codepoint) {
+        case 'b':
+        case 'B':
+            return INPUT_ACTION_MOVE_WORD_LEFT;
+        case 'f':
+        case 'F':
+            return INPUT_ACTION_MOVE_WORD_RIGHT;
+        case 'd':
+        case 'D':
+            return INPUT_ACTION_KILL_WORD_FWD;
+        case 127:
+        case 8:
+            return INPUT_ACTION_KILL_WORD_BACK_ALNUM;
+        }
+    }
+    return INPUT_ACTION_NONE;
+}
+
+int input_core_csi_u_legacy(int codepoint, int mods)
+{
+    /* Enter, Tab, and Backspace stay legacy bytes under the report flags this
+     * app pushes, so they reach here only under a wider stack another app
+     * pushed; resolve them so they cannot be swallowed as unbound. */
+    if (mods == 0) {
+        if (codepoint == 13 || codepoint == 9 || codepoint == 127)
+            return codepoint;
+        return -1;
+    }
+    /* Ctrl chords synthesize the control byte and Shift collapses into it; Alt
+     * reports resolve through the action table, and function-key codepoints,
+     * Esc, and Shift letters have no control-byte form. */
+    if ((mods & CSI_U_MOD_CTRL) != 0 && (mods & CSI_U_MOD_ALT) == 0) {
+        if (codepoint >= 'a' && codepoint <= 'z')
+            return codepoint - 96;
+        if (codepoint >= 'A' && codepoint <= 'Z')
+            return codepoint - 64;
+    }
+    return -1;
 }

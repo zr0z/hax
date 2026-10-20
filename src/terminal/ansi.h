@@ -40,6 +40,12 @@
 #define ANSI_BRACKETED_PASTE_ENABLE  ANSI_CSI "?2004h"
 #define ANSI_BRACKETED_PASTE_DISABLE ANSI_CSI "?2004l"
 
+/* Kitty keyboard protocol flag 1 (disambiguate): Shift+Enter arrives as a distinct key
+ * report while Enter, Tab, and Backspace stay their legacy bytes. Terminals without the
+ * protocol ignore it; tmux ignores it too and forwards legacy bytes unchanged. */
+#define ANSI_KITTY_KEYBOARD_ENABLE  ANSI_CSI ">1u"
+#define ANSI_KITTY_KEYBOARD_DISABLE ANSI_CSI "<u"
+
 /* SGR (1006) mouse tracking with button-event reporting (1000): presses and releases are
  * reported, drags only while a button is held, and the wheel scrolls nothing else. Terminals
  * without SGR support ignore 1006 and report X10-style coordinates instead. */

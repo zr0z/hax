@@ -149,10 +149,14 @@ size_t input_core_line_end(const struct input *in);
  * geometry; a column past the row's content lands at the row's end. */
 size_t input_core_offset_at(const struct input *in, int row, int col);
 
-/* A 1-based terminal cell, carried by mouse clicks and DSR cursor reports. */
+/* A 1-based terminal cell, carried by mouse clicks and DSR cursor reports; CSI-u key
+ * reports carry their codepoint and modifier (1 + bitmask: shift 1, alt 2, ctrl 4)
+ * in the second pair. */
 struct input_click {
     int row;
     int col;
+    int codepoint;
+    int mods;
 };
 
 /* Click hit-test failure: no anchor or the click missed the painted area. Distinct from every
@@ -273,17 +277,27 @@ enum input_action {
     INPUT_ACTION_PASTE_BEGIN,   /* body follows in the byte stream */
     INPUT_ACTION_MOUSE_CLICK,   /* press; coordinates surface through the out-parameter */
     INPUT_ACTION_CURSOR_REPORT, /* DSR reply; row and column the same way */
+    INPUT_ACTION_CSI_U,         /* Kitty key report; codepoint and modifier the same way */
 };
 
 /* Return 0..255, or -1 when no byte is available. */
 typedef int (*input_byte_reader)(void *user);
 
 /* Decode bytes following an already-consumed ESC. Reads are bounded; unknown, partial, or
- * abandoned sequences return INPUT_ACTION_NONE. With `out`, mouse clicks and cursor reports
- * deliver their coordinates there; every other action leaves it untouched. Release, drag, and
- * wheel reports decode to INPUT_ACTION_NONE but are consumed so they cannot leak as text.
- * Pass NULL from callers that do not consume coordinates. */
+ * abandoned sequences return INPUT_ACTION_NONE. With `out`, mouse clicks, cursor reports, and
+ * CSI-u key reports deliver their payload there; every other action leaves it untouched.
+ * Release, drag, and wheel reports decode to INPUT_ACTION_NONE but are consumed so they cannot
+ * leak as text. Pass NULL from callers that do not consume coordinates. */
 enum input_action input_core_decode_escape(input_byte_reader read, void *user,
                                            struct input_click *out);
+
+/* Resolve a CSI-u key report (codepoint plus the modifier bitmask as the decoder carries
+ * it) to an editor action, mirroring the decoder's Alt-meta byte branch; INPUT_ACTION_NONE
+ * for combinations with no binding, including the ones the legacy byte synthesizes instead. */
+enum input_action input_core_csi_u_action(int codepoint, int mods);
+
+/* The legacy byte a CSI-u report stands in for — the control byte for Ctrl chords, the
+ * plain byte for an unmodified functional key — or -1 when the key has no legacy form. */
+int input_core_csi_u_legacy(int codepoint, int mods);
 
 #endif /* HAX_TERMINAL_INPUT_CORE_H */

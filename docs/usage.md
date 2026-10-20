@@ -116,7 +116,7 @@ The editor supports common readline-style movement and history keys. Notable hax
 | Key | Action |
 | --- | --- |
 | Enter | Submit; at a paused empty prompt, continue without adding a message. |
-| Shift-Enter | Insert a newline if the terminal sends LF for it. |
+| Shift-Enter | Insert a newline. On terminals supporting the Kitty keyboard protocol (kitty, foot, Ghostty, WezTerm) hax requests distinct Shift-Enter reports; elsewhere it works wherever the terminal sends LF for it, with Alt-Enter as fallback. |
 | Up / Down | Move between lines of a multi-line prompt; recall previous/next prompts at the first and last line. |
 | Left click | Move the cursor to a clicked cell of a prompt that has text. Mouse reporting rides the draft, so an empty prompt and everything outside it keep native terminal select-copy. |
 | Ctrl-R | Search prompt history. |

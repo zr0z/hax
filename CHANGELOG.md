@@ -9,6 +9,10 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- Shift-Enter inserts a newline at the prompt on terminals that speak the Kitty keyboard
+  protocol (kitty, foot, Ghostty, WezTerm): hax requests the disambiguate mode while the
+  prompt is active, and Ctrl chords reported the same way behave exactly as their legacy
+  bytes. Terminals without the protocol, and tmux, keep the existing LF/Alt-Enter path.
 - Click inside the prompt to move the cursor to the clicked cell. Mouse reporting is on only
   while the draft has text, so an empty prompt keeps native terminal drag-select and copy —
   including in terminal multiplexers; releases, drags, and the wheel are ignored.

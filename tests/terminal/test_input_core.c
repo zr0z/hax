@@ -1252,7 +1252,7 @@ static void test_decode_paste_begin(void)
 static void test_decode_mouse_press(void)
 {
     /* SGR 1006: CSI < button ; col ; row M. Coordinates surface verbatim. */
-    struct input_click click = {0, 0};
+    struct input_click click = {0, 0, 0, 0};
     EXPECT(decode_click("[<0;12;7M", &click) == INPUT_ACTION_MOUSE_CLICK);
     EXPECT(click.row == 7 && click.col == 12);
 
@@ -1262,7 +1262,7 @@ static void test_decode_mouse_press(void)
 
 static void test_decode_mouse_swallowed(void)
 {
-    struct input_click click = {0, 0};
+    struct input_click click = {0, 0, 0, 0};
 
     /* Release ('m'), press-hold variants, drag motion (32+), and wheel (64/65)
      * are consumed with no action and no payload (S10). */
@@ -1283,7 +1283,7 @@ static void test_decode_mouse_swallowed(void)
 static void test_decode_cursor_report(void)
 {
     /* DSR reply: CSI row ; col R. */
-    struct input_click pos = {0, 0};
+    struct input_click pos = {0, 0, 0, 0};
     EXPECT(decode_click("[12;37R", &pos) == INPUT_ACTION_CURSOR_REPORT);
     EXPECT(pos.row == 12 && pos.col == 37);
 
@@ -1382,7 +1382,8 @@ static void test_csi_u_resolution_table(void)
     EXPECT(input_core_csi_u_legacy(27, 0) == -1);
     EXPECT(input_core_csi_u_legacy(57364, 0) == -1);
     EXPECT(input_core_csi_u_legacy(98, 2) == -1);
-    EXPECT(input_core_csi_u_action(57419, 0) == INPUT_ACTION_NONE); /* Up — never arrives this way */
+    EXPECT(input_core_csi_u_action(57419, 0) ==
+           INPUT_ACTION_NONE); /* Up — never arrives this way */
 }
 
 static void test_decode_overflow_and_runaway(void)

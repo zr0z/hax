@@ -97,7 +97,7 @@ static void enable_raw_mode(struct input *in)
     if (tcsetattr(STDIN_FILENO, TCSADRAIN, &raw) < 0)
         return;
 
-    fputs(ANSI_BRACKETED_PASTE_ENABLE, stdout);
+    fputs(ANSI_BRACKETED_PASTE_ENABLE ANSI_KITTY_KEYBOARD_ENABLE, stdout);
     fflush(stdout);
     in->raw_active = 1;
 }
@@ -108,7 +108,7 @@ static void disable_raw_mode(struct input *in)
         return;
     if (in->mouse_active)
         fputs(ANSI_MOUSE_DISABLE, stdout);
-    fputs(ANSI_BRACKETED_PASTE_DISABLE, stdout);
+    fputs(ANSI_KITTY_KEYBOARD_DISABLE ANSI_BRACKETED_PASTE_DISABLE, stdout);
     fflush(stdout);
     tcsetattr(STDIN_FILENO, TCSADRAIN, &in->saved_termios);
     in->raw_active = 0;
@@ -249,6 +249,7 @@ static void apply_action(struct input *in, enum input_action a)
         return;
     case INPUT_ACTION_MOUSE_CLICK:
     case INPUT_ACTION_CURSOR_REPORT:
+    case INPUT_ACTION_CSI_U:
         /* Resolved in handle_escape_sequence, which owns the click payload and anchor. */
         return;
     case INPUT_ACTION_MOVE_LEFT:
@@ -307,6 +308,21 @@ static void place_cursor_at_click(struct input *in, const struct input_click *cl
     in->desired_col = -1;
 }
 
+/* A CSI-u key report resolves to a bound action; otherwise the legacy byte it stands
+ * for replays through the byte switch, so Ctrl chords and report-all keys need no
+ * second keymap. Combinations with neither are consumed silently. */
+static void handle_csi_u(struct input *in, const struct input_click *key)
+{
+    enum input_action a = input_core_csi_u_action(key->codepoint, key->mods);
+    if (a != INPUT_ACTION_NONE) {
+        apply_action(in, a);
+        return;
+    }
+    int legacy = input_core_csi_u_legacy(key->codepoint, key->mods);
+    if (legacy >= 0 && in->deferred_key < 0)
+        in->deferred_key = legacy;
+}
+
 /* Anchor the edit area to absolute screen rows so clicks can be hit-tested: ask the
  * terminal where the cursor is and subtract where the caret sits within the painted
  * frame. Any repaint moves the area, so each click after one pays the round trip —
@@ -338,6 +354,8 @@ static void handle_anchor_click(struct input *in, const struct input_click *clic
             }
             if (a == INPUT_ACTION_PASTE_BEGIN)
                 handle_bracketed_paste(in);
+            else if (a == INPUT_ACTION_CSI_U)
+                handle_csi_u(in, &reply);
             else if (a != INPUT_ACTION_NONE)
                 apply_action(in, a); /* a key in flight keeps its order */
             continue;
@@ -357,6 +375,10 @@ static void handle_escape_sequence(struct input *in)
             place_cursor_at_click(in, &click);
         else
             handle_anchor_click(in, &click);
+        return;
+    }
+    if (action == INPUT_ACTION_CSI_U) {
+        handle_csi_u(in, &click);
         return;
     }
     apply_action(in, action);

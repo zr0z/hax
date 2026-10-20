@@ -263,8 +263,8 @@ static void restore_terminal(void)
         watcher.raw_mode_active = 0;
     }
     if (watcher.interactive_terminal) {
-        static const char restore_sequence[] =
-            ANSI_MOUSE_DISABLE ANSI_BRACKETED_PASTE_DISABLE ANSI_CURSOR_SHOW ANSI_SYNC_END;
+        static const char restore_sequence[] = ANSI_MOUSE_DISABLE ANSI_KITTY_KEYBOARD_DISABLE
+            ANSI_BRACKETED_PASTE_DISABLE ANSI_CURSOR_SHOW ANSI_SYNC_END;
         (void)!write(STDOUT_FILENO, restore_sequence, sizeof(restore_sequence) - 1);
     }
 }

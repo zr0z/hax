@@ -1,5 +1,13 @@
 project('hax', 'c',
-    version: '0.6.1',
+    # Fork marker: the fleet builds this tree from a gitless tarball, where the
+    # vcs_tag fallback below is the only thing that reaches HAX_VERSION — so the
+    # suffix is what makes `hax --version`, the HTTP User-Agent, and the session
+    # `hax_version` field distinguishable from upstream. Rationale as gufo D-IQ-4:
+    # a version nobody can mistake for upstream. In a git checkout `git describe`
+    # wins and this string does not appear. The counter moves once per shipped
+    # series revision, which makes it the deploy probe: `hax --version` answers
+    # which patch set a host runs, not merely which hax it runs.
+    version: '0.6.1+fork2',
     license: 'MIT',
     default_options: [
         'c_std=c11',

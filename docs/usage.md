@@ -264,6 +264,12 @@ window. Use `/compact` earlier when the conversation has accumulated obsolete ex
 optionally naming what the summary must preserve. Manual compaction works even when the model's
 context limit is unknown.
 
+What a compaction leaves behind is all the model can see: the summary, plus the session's first
+prompt copied verbatim beneath it. That summary opens with a checklist of every item the request
+asked for — `done`, `in progress`, or `not started` — so work that had not begun survives the
+context being cleared instead of leaving with the history that named it. `/session` shows the
+whole conversation either way.
+
 For local servers, configure a context window large enough for the system prompt, project context,
 conversation, and response. A small server-side context often appears as truncated answers rather
 than a hax error; see the provider-specific notes in [providers.md](./providers.md).

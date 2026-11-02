@@ -25,6 +25,10 @@ static const char COMPACT_PROMPT[] =
     "\n"
     "Use this exact Markdown structure, keeping every section even when empty:\n"
     "\n"
+    "## Original Items\n"
+    "- [every distinct thing the user asked for, each marked `done`, `in progress`, or "
+    "`not started`]\n"
+    "\n"
     "## Goal\n"
     "- [what the user is ultimately trying to accomplish]\n"
     "\n"
@@ -53,6 +57,9 @@ static const char COMPACT_PROMPT[] =
     "\"(none)\"]\n"
     "\n"
     "Rules:\n"
+    "- Enumerate every item of the user's request in ## Original Items, including items that were "
+    "never started, and never drop an item an earlier checkpoint listed: the request itself is "
+    "re-stated with every summary, so an item missing here has been abandoned, not forgotten.\n"
     "- Be terse: bullets, not prose paragraphs.\n"
     "- Preserve exact file paths, function names, commands, and error strings.\n"
     "- Do not mention that a summary was produced or that context was compacted.";
@@ -61,6 +68,16 @@ static const char COMPACT_SEED_PREAMBLE[] =
     "The earlier part of this conversation was condensed to free up context. The summary "
     "below captures everything that happened before this point — treat it as established "
     "context and continue the work from here.";
+
+/* The summary is the summarizer's judgement of what still matters, so it cannot
+ * also be the record of what was asked: an item never started has no progress to
+ * report and vanishes from the model's view with the history that named it. The
+ * request is therefore carried verbatim, never paraphrased or truncated. It goes
+ * after the summary — the preamble promises "the summary below", and this puts
+ * the request nearest the turn that still has to serve it. */
+static const char COMPACT_SEED_REQUEST_MARKER[] =
+    "---\n"
+    "Your original request, verbatim. Every item in it must still appear in the checklist above:";
 
 int compact_auto_enabled(void)
 {
@@ -94,9 +111,28 @@ static char *build_summary_prompt(const char *instructions)
     return xstrdup(COMPACT_PROMPT);
 }
 
-static char *build_summary_seed(const char *summary)
+/* The session's first typed prompt, borrowed — the caller must not free it.
+ *
+ * The whole conversation is scanned, not the segment being compacted: after the
+ * first compaction the model-visible window begins at a seed, and a seed is not
+ * a typed prompt, so a window scan would lose the request at exactly the moment
+ * the context is tightest. Scanning from the front is also what makes the *first*
+ * request survive rather than the newest. `retired` items (turns /undo removed)
+ * are deliberately not read: an undone request stays undone. */
+static const char *first_typed_prompt(const struct agent_session *session)
 {
-    return xasprintf("%s\n\n%s", COMPACT_SEED_PREAMBLE, summary);
+    for (size_t i = 0; i < session->n_items; i++)
+        if (item_is_typed_prompt(&session->items[i]))
+            return session->items[i].text;
+    return NULL;
+}
+
+static char *build_summary_seed(const char *request, const char *summary)
+{
+    if (!request)
+        return xasprintf("%s\n\n%s", COMPACT_SEED_PREAMBLE, summary);
+    return xasprintf("%s\n\n%s\n\n%s\n\n%s", COMPACT_SEED_PREAMBLE, summary,
+                     COMPACT_SEED_REQUEST_MARKER, request);
 }
 
 #define COMPACT_MAX_ATTEMPTS 4
@@ -276,11 +312,12 @@ static char *generate_summary(const struct compact_params *params, struct compac
 static void append_summary_seed(struct agent_session *session, const char *summary)
 {
     agent_session_add_boundary(session);
-    agent_session_append(session, (struct item){
-                                      .kind = ITEM_USER_MESSAGE,
-                                      .text = build_summary_seed(summary),
-                                      .origin = ITEM_ORIGIN_COMPACT_SEED,
-                                  });
+    agent_session_append(session,
+                         (struct item){
+                             .kind = ITEM_USER_MESSAGE,
+                             .text = build_summary_seed(first_typed_prompt(session), summary),
+                             .origin = ITEM_ORIGIN_COMPACT_SEED,
+                         });
 }
 
 static void flush_compaction_logs(const struct compact_params *params)

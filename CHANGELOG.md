@@ -9,6 +9,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ### Added
 
+- A compaction now keeps the original request. The checkpoint restates the session's first
+  prompt verbatim below the summary, and the summary opens with a checklist of every item in
+  it — `done`, `in progress`, or `not started` — so work that had not begun survives the
+  context being cleared instead of leaving with the history that named it. Sessions with no
+  typed prompt, such as a resumed checkpoint or a one-shot run, compact exactly as before.
 - Shift-Enter inserts a newline at the prompt on terminals that speak the Kitty keyboard
   protocol (kitty, foot, Ghostty, WezTerm): hax requests the disambiguate mode while the
   prompt is active, and Ctrl chords reported the same way behave exactly as their legacy

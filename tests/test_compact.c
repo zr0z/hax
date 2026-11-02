@@ -71,12 +71,16 @@ struct mock_state {
     int cancel_requested;
     int observed_events;
     size_t last_request_items;
+    /* The summarization prompt of the last request, so a test can read what the
+     * summarizer was actually told rather than only how many items it got. */
+    char *last_prompt;
 };
 
 static struct mock_state mock;
 
 static void reset_mock(enum mock_script script)
 {
+    free(mock.last_prompt);
     memset(&mock, 0, sizeof(mock));
     mock.script = script;
 }
@@ -140,6 +144,11 @@ static int mock_stream(struct provider *provider, const struct context *ctx, con
     (void)tick_user;
     EXPECT(ctx != NULL);
     mock.last_request_items = ctx->n_items;
+    /* The summarization prompt is the item compact.c appends after the borrowed
+     * window, so it is always the last one. */
+    if (ctx->n_items > 0 && ctx->items[ctx->n_items - 1].kind == ITEM_USER_MESSAGE)
+        mock.last_prompt =
+            xstrdup(ctx->items[ctx->n_items - 1].text ? ctx->items[ctx->n_items - 1].text : "");
     mock.stream_calls++;
 
     if ((mock.script == MOCK_RETRY_ONCE && mock.stream_calls == 1) ||
@@ -424,6 +433,280 @@ static void test_resumed_session_floors_at_seed(void)
     agent_session_free(&resumed);
 }
 
+/* ---- request retention across compaction ----
+ *
+ * The seed is the whole of the model-visible context after a compaction
+ * (items_context_floor), so anything it does not carry is gone for the model
+ * even though it survives in the session file. These tests hold the two
+ * guarantees: the seed restates the session's original request, and the
+ * summarizer is required to enumerate that request's items. */
+
+/* Pinned markers rather than whole sentences, so the wording around them can be
+ * tuned without rewriting the suite. */
+static const char REQUEST_MARKER[] = "Your original request, verbatim";
+static const char CHECKLIST_SECTION[] = "## Original Items";
+
+static const char MULTI_ITEM_REQUEST[] = "ship the rollout\n- draft the notes\n- tag the release";
+
+static void init_session_prompted(struct agent_session *session, const char *first_prompt)
+{
+    memset(session, 0, sizeof(*session));
+    session->model = xstrdup("model");
+    session->provider_id = "test";
+    agent_session_append(session,
+                         (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup(first_prompt)});
+}
+
+static void append_prompt(struct agent_session *session, const char *text)
+{
+    agent_session_append(session, (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup(text)});
+}
+
+/* The newest seed, which is the item the next request starts from. */
+static const char *newest_seed(struct agent_session *session)
+{
+    size_t index = items_context_floor(session->items, session->n_items);
+    EXPECT(index > 0);
+    EXPECT(session->items[index].origin == ITEM_ORIGIN_COMPACT_SEED);
+    return session->items[index].text;
+}
+
+static struct compact_result run_compaction_focus(struct agent_session *session,
+                                                  struct provider *provider, const char *focus)
+{
+    struct compact_params params = {
+        .session = session,
+        .provider = provider,
+        .instructions = focus,
+        .hooks =
+            {
+                .on_event = observe_event,
+                .is_cancelled = is_cancelled,
+            },
+    };
+    struct compact_result result;
+    compact_run(&params, &result);
+    return result;
+}
+
+static void test_seed_carries_original_request(void)
+{
+    struct agent_session session;
+    init_session_prompted(&session, MULTI_ITEM_REQUEST);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+
+    const char *seed = newest_seed(&session);
+    EXPECT(seed != NULL);
+    EXPECT(strstr(seed, REQUEST_MARKER) != NULL);
+    EXPECT(strstr(seed, MULTI_ITEM_REQUEST) != NULL);
+    /* The seed is still one synthetic item and still the start of the window. */
+    struct context window = agent_session_context(&session);
+    EXPECT(window.n_items == 2);
+    EXPECT(window.items[0].origin == ITEM_ORIGIN_COMPACT_SEED);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* Carried request sits after the summary, so the preamble's "the summary below"
+ * keeps referring to the summary. */
+static void test_seed_places_request_after_the_summary(void)
+{
+    struct agent_session session;
+    init_session_prompted(&session, MULTI_ITEM_REQUEST);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    const char *seed = newest_seed(&session);
+    const char *summary = strstr(seed, "## Goal");
+    const char *request = strstr(seed, MULTI_ITEM_REQUEST);
+    EXPECT(summary != NULL);
+    EXPECT(request != NULL);
+    EXPECT(summary < request);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* The request that survives is the session's first, not the one most recently
+ * typed. */
+static void test_seed_carries_the_first_request_not_the_newest(void)
+{
+    struct agent_session session;
+    init_session_prompted(&session, MULTI_ITEM_REQUEST);
+    append_prompt(&session, "and the follow-up");
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    const char *seed = newest_seed(&session);
+    EXPECT(strstr(seed, MULTI_ITEM_REQUEST) != NULL);
+    EXPECT(strstr(seed, "and the follow-up") == NULL);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* Verbatim means unaltered: an indented block and trailing spaces are copied,
+ * not trimmed, escaped, or re-wrapped. Compared against the stored item so the
+ * assertion is "a copy", not a reproduction of the fixture. */
+static void test_seed_carries_request_byte_for_byte(void)
+{
+    struct agent_session session;
+    init_session_prompted(&session,
+                          "fix the parser\n```\n    if (x) {   \n        return 1;\n    }\n```\n"
+                          "and keep the trailing spaces   ");
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    const char *seed = newest_seed(&session);
+    EXPECT(session.items[0].text != NULL);
+    EXPECT(strstr(seed, session.items[0].text) != NULL);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* A second pass reads the window the first left, which begins at the first seed
+ * and so has no typed prompt in it; the request has to come from the whole
+ * conversation or it disappears exactly when the context is tightest. */
+static void test_second_seed_still_carries_request(void)
+{
+    struct agent_session session;
+    init_session_prompted(&session, MULTI_ITEM_REQUEST);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+
+    struct compact_result first = run_compaction(&session, &provider, NULL);
+    EXPECT(first.outcome == COMPACT_COMPLETE);
+    compact_result_destroy(&first);
+
+    append_prompt(&session, "keep going");
+    struct compact_result second = run_compaction(&session, &provider, NULL);
+    EXPECT(second.outcome == COMPACT_COMPLETE);
+
+    const char *seed = newest_seed(&session);
+    EXPECT(strstr(seed, MULTI_ITEM_REQUEST) != NULL);
+    EXPECT(strstr(seed, "keep going") == NULL);
+
+    compact_result_destroy(&second);
+    agent_session_free(&session);
+}
+
+/* Nothing to carry: a resumed session whose only history is an earlier seed.
+ * Its seed must read as it did before the request was carried at all. */
+static void test_seed_without_typed_prompt_is_unchanged(void)
+{
+    struct agent_session session;
+    memset(&session, 0, sizeof(session));
+    session.model = xstrdup("model");
+    session.provider_id = "test";
+    agent_session_append(&session, (struct item){.kind = ITEM_USER_MESSAGE,
+                                                 .origin = ITEM_ORIGIN_COMPACT_SEED,
+                                                 .text = xstrdup("earlier seed")});
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+
+    const char *seed = newest_seed(&session);
+    EXPECT(strstr(seed, REQUEST_MARKER) == NULL);
+    EXPECT(strstr(seed, "earlier seed") == NULL);
+    EXPECT(strstr(seed, "- continue") != NULL);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* /undo moves a user turn to `retired`: a request the operator removed must not
+ * be resurrected by the next seed. */
+static void test_seed_ignores_retired_request(void)
+{
+    struct agent_session session;
+    memset(&session, 0, sizeof(session));
+    session.model = xstrdup("model");
+    session.provider_id = "test";
+    agent_session_append(&session, (struct item){.kind = ITEM_USER_MESSAGE,
+                                                 .origin = ITEM_ORIGIN_COMPACT_SEED,
+                                                 .text = xstrdup("earlier seed")});
+    session.retired = xmalloc(sizeof(struct item));
+    session.retired[0] =
+        (struct item){.kind = ITEM_USER_MESSAGE, .text = xstrdup("undone request")};
+    session.n_retired = 1;
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+
+    const char *seed = newest_seed(&session);
+    EXPECT(strstr(seed, REQUEST_MARKER) == NULL);
+    EXPECT(strstr(seed, "undone request") == NULL);
+
+    compact_result_destroy(&result);
+    agent_session_free(&session);
+}
+
+/* The request is found by item origin, never by matching text — so a user who
+ * quotes the marker keeps the same behavior, and the next compaction still
+ * finds the request. */
+static void test_request_quoting_the_marker_still_resolves(void)
+{
+    static const char quoted[] = "two items\n- first\n- Your original request, verbatim: quote me";
+    struct agent_session session;
+    init_session_prompted(&session, quoted);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+
+    struct compact_result first = run_compaction(&session, &provider, NULL);
+    EXPECT(first.outcome == COMPACT_COMPLETE);
+    compact_result_destroy(&first);
+
+    append_prompt(&session, "next");
+    struct compact_result second = run_compaction(&session, &provider, NULL);
+    EXPECT(second.outcome == COMPACT_COMPLETE);
+    EXPECT(strstr(newest_seed(&session), quoted) != NULL);
+
+    compact_result_destroy(&second);
+    agent_session_free(&session);
+}
+
+/* The summarizer must be required to open with every item of that request, and a
+ * manual focus still appends after the fixed structure. */
+static void test_summary_prompt_requires_item_checklist(void)
+{
+    struct agent_session session;
+    init_session_prompted(&session, MULTI_ITEM_REQUEST);
+    struct provider provider = {.name = "test", .stream = mock_stream};
+    reset_mock(MOCK_SUCCESS);
+
+    struct compact_result result = run_compaction(&session, &provider, NULL);
+    EXPECT(result.outcome == COMPACT_COMPLETE);
+    EXPECT(mock.last_prompt != NULL);
+    EXPECT(strstr(mock.last_prompt, CHECKLIST_SECTION) != NULL);
+    compact_result_destroy(&result);
+
+    reset_mock(MOCK_SUCCESS);
+    struct compact_result focused = run_compaction_focus(&session, &provider, "keep the plan");
+    EXPECT(focused.outcome == COMPACT_COMPLETE);
+    const char *section = strstr(mock.last_prompt, CHECKLIST_SECTION);
+    const char *focus = strstr(mock.last_prompt, "Additional focus for this summary:");
+    EXPECT(section != NULL);
+    EXPECT(focus != NULL);
+    EXPECT(section < focus);
+    EXPECT(strstr(mock.last_prompt, "keep the plan") != NULL);
+
+    compact_result_destroy(&focused);
+    agent_session_free(&session);
+}
+
 static void test_preserves_failure(void)
 {
     struct agent_session session;
@@ -513,9 +796,19 @@ int main(void)
     test_keeps_one_session();
     test_tool_call_retries_are_bounded();
     test_resumed_session_floors_at_seed();
+    test_seed_carries_original_request();
+    test_seed_places_request_after_the_summary();
+    test_seed_carries_the_first_request_not_the_newest();
+    test_seed_carries_request_byte_for_byte();
+    test_second_seed_still_carries_request();
+    test_seed_without_typed_prompt_is_unchanged();
+    test_seed_ignores_retired_request();
+    test_request_quoting_the_marker_still_resolves();
+    test_summary_prompt_requires_item_checklist();
     test_preserves_failure();
     test_rejects_empty_summary();
     test_rejects_incomplete_response();
     test_discards_cancelled_summary();
+    free(mock.last_prompt);
     T_REPORT();
 }

@@ -145,10 +145,13 @@ static int mock_stream(struct provider *provider, const struct context *ctx, con
     EXPECT(ctx != NULL);
     mock.last_request_items = ctx->n_items;
     /* The summarization prompt is the item compact.c appends after the borrowed
-     * window, so it is always the last one. */
-    if (ctx->n_items > 0 && ctx->items[ctx->n_items - 1].kind == ITEM_USER_MESSAGE)
+     * window, so it is always the last one. Replaced, not just set: one test may
+     * issue several requests, and each prompt it keeps would otherwise leak. */
+    if (ctx->n_items > 0 && ctx->items[ctx->n_items - 1].kind == ITEM_USER_MESSAGE) {
+        free(mock.last_prompt);
         mock.last_prompt =
             xstrdup(ctx->items[ctx->n_items - 1].text ? ctx->items[ctx->n_items - 1].text : "");
+    }
     mock.stream_calls++;
 
     if ((mock.script == MOCK_RETRY_ONCE && mock.stream_calls == 1) ||
